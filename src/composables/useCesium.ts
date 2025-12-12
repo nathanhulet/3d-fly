@@ -9,7 +9,7 @@ import type { AircraftState } from '@/types/game'
  * This corrects for the model's initial facing direction vs our +Y forward convention
  * Adjust this value if the model faces the wrong direction
  */
-const MODEL_ROTATION_DEGREES = -90
+const MODEL_ROTATION_DEGREES = 90
 
 /**
  * Apply model rotation correction AND convert from ENU-relative to ECEF orientation
@@ -191,8 +191,8 @@ export function useCesium() {
     // Heading 0 = North (+Y), 90 = East (+X)
     const heading = Math.atan2(forwardENU.x, forwardENU.y)
 
-    // Apply model rotation correction for camera positioning
-    const correctedHeading = heading + Cesium.Math.toRadians(MODEL_ROTATION_DEGREES)
+    // Camera follows physics heading, NOT model rotation
+    // The camera should be behind where the aircraft is actually going
 
     // Calculate camera position behind and above aircraft
     const behindDistance = CAMERA.FOLLOW_DISTANCE
@@ -200,8 +200,8 @@ export function useCesium() {
 
     // Camera offset in local ENU coordinates (behind the aircraft)
     const offsetLocal = new Cesium.Cartesian3(
-      -Math.sin(correctedHeading) * behindDistance,
-      -Math.cos(correctedHeading) * behindDistance,
+      -Math.sin(heading) * behindDistance,
+      -Math.cos(heading) * behindDistance,
       aboveDistance
     )
 
@@ -222,7 +222,7 @@ export function useCesium() {
     camera.setView({
       destination: cameraPosition,
       orientation: {
-        heading: correctedHeading,
+        heading: heading,
         pitch: Cesium.Math.toRadians(-15),
         roll: 0
       }

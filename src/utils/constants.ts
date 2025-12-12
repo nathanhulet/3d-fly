@@ -17,7 +17,7 @@ export const PHYSICS = {
   MAX_THRUST: 130000,       // Newtons (with afterburner)
   IDLE_THRUST: 20000,       // Newtons (idle)
   WING_AREA: 28,            // m^2
-  LIFT_COEFFICIENT: 1.2,
+  LIFT_COEFFICIENT: 0.11,    // Tuned for level flight at cruise speed
   DRAG_COEFFICIENT: 0.025,
   AIR_DENSITY: 1.225,       // kg/m^3 at sea level
   GRAVITY: 9.81,            // m/s^2
