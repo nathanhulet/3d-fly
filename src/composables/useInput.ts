@@ -91,8 +91,8 @@ export function useInput() {
    */
   function getInputState(): InputState {
     const state: InputState = {
-      pitch: (keys.d ? 1 : 0) - (keys.a ? 1 : 0),  // D = pitch up, A = pitch down
-      roll: (keys.w ? 1 : 0) - (keys.s ? 1 : 0),   // W = roll right, S = roll left
+      pitch: (keys.w ? 1 : 0) - (keys.s ? 1 : 0),  // W = nose up, S = nose down
+      roll: (keys.d ? 1 : 0) - (keys.a ? 1 : 0),   // D = roll right, A = roll left
       yaw: accumulatedMouseX,
       throttleUp: keys.shift,
       throttleDown: keys.ctrl,

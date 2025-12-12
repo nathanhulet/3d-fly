@@ -24,7 +24,7 @@ export function useWeapons() {
       return null
     }
 
-    const forward = FlightModel.getForwardDirection(state.orientation)
+    const forward = FlightModel.getForwardDirection(state.position, state.orientation)
     const velocity = Cesium.Cartesian3.multiplyByScalar(
       forward,
       WEAPONS.MISSILE.SPEED,
@@ -59,7 +59,7 @@ export function useWeapons() {
       return null
     }
 
-    const forward = FlightModel.getForwardDirection(state.orientation)
+    const forward = FlightModel.getForwardDirection(state.position, state.orientation)
 
     // Add random spread
     const spread = WEAPONS.GUN.SPREAD
@@ -252,7 +252,7 @@ export function useWeapons() {
     playerId: string,
     players: Map<string, Player>
   ): string | null {
-    const forward = FlightModel.getForwardDirection(state.orientation)
+    const forward = FlightModel.getForwardDirection(state.position, state.orientation)
     const lockAngleRad = Cesium.Math.toRadians(WEAPONS.MISSILE.LOCK_ANGLE)
 
     let bestTarget: string | null = null

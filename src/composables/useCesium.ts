@@ -1,20 +1,31 @@
 import { ref, shallowRef, onUnmounted } from 'vue'
 import * as Cesium from 'cesium'
 import { ARENA, CAMERA } from '@/utils/constants'
+import { FlightModel } from '@/game/physics/FlightModel'
 import type { AircraftState } from '@/types/game'
 
 /**
- * Apply model rotation correction to orientation quaternion
- * Adjust MODEL_ROTATION_DEGREES until the model faces forward
+ * Model rotation correction applied to the body-frame orientation
+ * This corrects for the model's initial facing direction vs our +Y forward convention
+ * Adjust this value if the model faces the wrong direction
  */
-const MODEL_ROTATION_DEGREES = -90  // Rotate from facing right to facing forward
+const MODEL_ROTATION_DEGREES = -90
 
-function applyModelRotation(orientation: Cesium.Quaternion): Cesium.Quaternion {
+/**
+ * Apply model rotation correction AND convert from ENU-relative to ECEF orientation
+ * @param position Aircraft position (needed for ENU frame)
+ * @param orientation ENU-relative orientation quaternion
+ */
+function getModelOrientation(position: Cesium.Cartesian3, orientation: Cesium.Quaternion): Cesium.Quaternion {
+  // First apply model correction (rotate in body frame)
   const modelCorrection = Cesium.Quaternion.fromAxisAngle(
     Cesium.Cartesian3.UNIT_Z,
     Cesium.Math.toRadians(MODEL_ROTATION_DEGREES)
   )
-  return Cesium.Quaternion.multiply(orientation, modelCorrection, new Cesium.Quaternion())
+  const correctedOrientation = Cesium.Quaternion.multiply(orientation, modelCorrection, new Cesium.Quaternion())
+
+  // Then convert from ENU-relative to ECEF
+  return FlightModel.getECEFOrientation(position, correctedOrientation)
 }
 
 export function useCesium() {
@@ -82,7 +93,7 @@ export function useCesium() {
 
     const entity = viewer.value.entities.add({
       position: new Cesium.CallbackProperty(() => state.position, false) as any,
-      orientation: new Cesium.CallbackProperty(() => applyModelRotation(state.orientation), false) as any,
+      orientation: new Cesium.CallbackProperty(() => getModelOrientation(state.position, state.orientation), false) as any,
       model: {
         uri: '/models/f16.glb',
         scale: 1.0,
@@ -102,14 +113,12 @@ export function useCesium() {
   async function createRemoteAircraft(playerId: string, position: Cesium.Cartesian3, orientation: Cesium.Quaternion): Promise<Cesium.Entity | null> {
     if (!viewer.value) return null
 
-    // Create position/orientation properties that we'll update
-    const positionProperty = new Cesium.SampledPositionProperty()
-    positionProperty.addSample(Cesium.JulianDate.now(), position)
-
+    // For remote aircraft, we use ConstantPositionProperty so we can update it directly
+    // (Dead-reckoning system handles the interpolation)
     const entity = viewer.value.entities.add({
       id: `aircraft-${playerId}`,
-      position: positionProperty,
-      orientation: new Cesium.ConstantProperty(applyModelRotation(orientation)),
+      position: new Cesium.ConstantPositionProperty(position),
+      orientation: new Cesium.ConstantProperty(getModelOrientation(position, orientation)),
       model: {
         uri: '/models/f16.glb',
         scale: 1.0,
@@ -137,19 +146,17 @@ export function useCesium() {
 
   /**
    * Update remote aircraft position/orientation
+   * Called by the dead-reckoning system with interpolated positions
    */
   function updateRemoteAircraft(playerId: string, position: Cesium.Cartesian3, orientation: Cesium.Quaternion) {
     const entity = remoteAircraftEntities.value.get(playerId)
     if (!entity || !viewer.value) return
 
-    // Update position using sampled property for interpolation
-    const positionProperty = entity.position as Cesium.SampledPositionProperty
-    if (positionProperty instanceof Cesium.SampledPositionProperty) {
-      positionProperty.addSample(Cesium.JulianDate.now(), position)
-    }
+    // Update position directly (dead-reckoning handles interpolation)
+    entity.position = new Cesium.ConstantPositionProperty(position) as any
 
-    // Update orientation (with model rotation correction)
-    entity.orientation = new Cesium.ConstantProperty(applyModelRotation(orientation)) as any
+    // Update orientation (with model rotation correction and ENU->ECEF conversion)
+    entity.orientation = new Cesium.ConstantProperty(getModelOrientation(position, orientation)) as any
   }
 
   /**
@@ -171,30 +178,36 @@ export function useCesium() {
 
     const camera = viewer.value.camera
 
-    // Get aircraft's local coordinate frame
-    const transform = Cesium.Transforms.eastNorthUpToFixedFrame(state.position)
+    // Get aircraft's local ENU coordinate frame
+    const enuTransform = Cesium.Transforms.eastNorthUpToFixedFrame(state.position)
 
-    // Get aircraft's heading from orientation
-    const hpr = Cesium.HeadingPitchRoll.fromQuaternion(state.orientation)
+    // Get the aircraft's forward direction in ENU frame
+    // Our orientation is ENU-relative, and body +Y is forward
+    const bodyToENU = Cesium.Matrix3.fromQuaternion(state.orientation)
+    const forwardBody = new Cesium.Cartesian3(0, 1, 0)
+    const forwardENU = Cesium.Matrix3.multiplyByVector(bodyToENU, forwardBody, new Cesium.Cartesian3())
 
-    // Apply the same rotation correction used for the model
-    // so camera is behind the aircraft's visual forward direction
-    const correctedHeading = hpr.heading + Cesium.Math.toRadians(MODEL_ROTATION_DEGREES)
+    // Calculate heading from forward direction in ENU (E=X, N=Y)
+    // Heading 0 = North (+Y), 90 = East (+X)
+    const heading = Math.atan2(forwardENU.x, forwardENU.y)
+
+    // Apply model rotation correction for camera positioning
+    const correctedHeading = heading + Cesium.Math.toRadians(MODEL_ROTATION_DEGREES)
 
     // Calculate camera position behind and above aircraft
     const behindDistance = CAMERA.FOLLOW_DISTANCE
     const aboveDistance = CAMERA.FOLLOW_HEIGHT
 
-    // Camera offset in local ENU coordinates (using corrected heading)
+    // Camera offset in local ENU coordinates (behind the aircraft)
     const offsetLocal = new Cesium.Cartesian3(
       -Math.sin(correctedHeading) * behindDistance,
       -Math.cos(correctedHeading) * behindDistance,
       aboveDistance
     )
 
-    // Transform offset to world coordinates
+    // Transform offset to ECEF coordinates
     const offsetWorld = Cesium.Matrix4.multiplyByPointAsVector(
-      transform,
+      enuTransform,
       offsetLocal,
       new Cesium.Cartesian3()
     )
@@ -205,7 +218,7 @@ export function useCesium() {
       new Cesium.Cartesian3()
     )
 
-    // Set camera position and look at aircraft (using corrected heading)
+    // Set camera position and look at aircraft
     camera.setView({
       destination: cameraPosition,
       orientation: {
@@ -217,26 +230,30 @@ export function useCesium() {
   }
 
   /**
-   * Create missile entity
+   * Create missile entity using AIM-120D model
    */
   function createMissile(id: string, position: Cesium.Cartesian3, orientation: Cesium.Quaternion): Cesium.Entity | null {
     if (!viewer.value) return null
 
+    // Apply missile model rotation correction and convert to ECEF
+    const missileOrientation = getModelOrientation(position, orientation)
+
     return viewer.value.entities.add({
       id: `missile-${id}`,
       position: new Cesium.ConstantPositionProperty(position),
-      orientation: new Cesium.ConstantProperty(orientation),
-      cylinder: {
-        length: 4,
-        topRadius: 0.15,
-        bottomRadius: 0.15,
-        material: Cesium.Color.RED
+      orientation: new Cesium.ConstantProperty(missileOrientation),
+      model: {
+        uri: '/models/AIM120D.glb',
+        scale: 1.0,
+        minimumPixelSize: 16,
+        maximumScale: 50,
+        runAnimations: false
       }
     })
   }
 
   /**
-   * Update missile position
+   * Update missile position and orientation
    */
   function updateMissile(id: string, position: Cesium.Cartesian3, orientation: Cesium.Quaternion) {
     if (!viewer.value) return
@@ -244,7 +261,9 @@ export function useCesium() {
     const entity = viewer.value.entities.getById(`missile-${id}`)
     if (entity) {
       entity.position = new Cesium.ConstantPositionProperty(position) as any
-      entity.orientation = new Cesium.ConstantProperty(orientation) as any
+      // Convert ENU-relative orientation to ECEF for rendering
+      const ecefOrientation = getModelOrientation(position, orientation)
+      entity.orientation = new Cesium.ConstantProperty(ecefOrientation) as any
     }
   }
 

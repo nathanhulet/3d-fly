@@ -9,6 +9,7 @@ import { useGameStore } from '@/stores/gameStore'
 import { useInput } from '@/composables/useInput'
 import { useWeapons } from '@/composables/useWeapons'
 import { useNetworking } from '@/composables/useNetworking'
+import { useDeadReckoning } from '@/composables/useDeadReckoning'
 import { FlightModel } from '@/game/physics/FlightModel'
 import { SPAWN_POINTS, GAME, WEAPONS, ARENA, PHYSICS } from '@/utils/constants'
 import type { AircraftState, Player } from '@/types/game'
@@ -18,6 +19,7 @@ const gameStore = useGameStore()
 const input = useInput()
 const weapons = useWeapons()
 const networking = useNetworking()
+const deadReckoning = useDeadReckoning()
 
 const cesiumViewerRef = ref<InstanceType<typeof CesiumViewer> | null>(null)
 const containerRef = ref<HTMLDivElement | null>(null)
@@ -109,22 +111,25 @@ function setupNetworkHandlers() {
   networking.onPlayerLeave.value = (playerId) => {
     networking.removePlayer(playerId)
     gameStore.removePlayer(playerId)
+    deadReckoning.removePlayer(playerId)
     cesiumViewerRef.value?.cesium.removeRemoteAircraft(playerId)
   }
 
   networking.onPositionUpdate.value = (msg) => {
     const player = networking.players.get(msg.id)
     if (player) {
-      player.position = new Cesium.Cartesian3(msg.p[0], msg.p[1], msg.p[2])
-      player.orientation = new Cesium.Quaternion(msg.q[0], msg.q[1], msg.q[2], msg.q[3])
-      player.velocity = new Cesium.Cartesian3(msg.v[0], msg.v[1], msg.v[2])
+      const position = new Cesium.Cartesian3(msg.p[0], msg.p[1], msg.p[2])
+      const orientation = new Cesium.Quaternion(msg.q[0], msg.q[1], msg.q[2], msg.q[3])
+      const velocity = new Cesium.Cartesian3(msg.v[0], msg.v[1], msg.v[2])
+
+      // Update player record
+      player.position = position
+      player.orientation = orientation
+      player.velocity = velocity
       player.lastUpdate = msg.ts
 
-      cesiumViewerRef.value?.cesium.updateRemoteAircraft(
-        msg.id,
-        player.position,
-        player.orientation
-      )
+      // Send to dead-reckoning system for smooth interpolation
+      deadReckoning.receiveUpdate(msg.id, position, orientation, velocity, msg.ts)
     }
   }
 
@@ -266,6 +271,23 @@ function gameLoop() {
     )
   }
 
+  // Always update dead-reckoning and remote aircraft visuals (even when dead)
+  if (isInitialized.value) {
+    deadReckoning.update(dt)
+
+    // Update remote aircraft positions using dead-reckoned state
+    for (const [playerId] of networking.players) {
+      const renderState = deadReckoning.getRenderState(playerId)
+      if (renderState) {
+        cesiumViewerRef.value?.cesium.updateRemoteAircraft(
+          playerId,
+          renderState.position,
+          renderState.orientation
+        )
+      }
+    }
+  }
+
   animationFrameId = requestAnimationFrame(gameLoop)
 }
 
@@ -354,9 +376,15 @@ function updateHUDValues() {
   altitude.value = Math.round(cartographic.altitude)
   speed.value = Math.round(aircraftState.speed)
 
-  // Calculate heading from orientation
-  const hpr = Cesium.HeadingPitchRoll.fromQuaternion(aircraftState.orientation)
-  heading.value = Math.round(Cesium.Math.toDegrees(hpr.heading))
+  // Calculate heading from ENU-relative orientation
+  // Our orientation is ENU-relative, body +Y is forward
+  const bodyToENU = Cesium.Matrix3.fromQuaternion(aircraftState.orientation)
+  const forwardBody = new Cesium.Cartesian3(0, 1, 0)
+  const forwardENU = Cesium.Matrix3.multiplyByVector(bodyToENU, forwardBody, new Cesium.Cartesian3())
+
+  // Heading in ENU: 0 = North (+Y), 90 = East (+X)
+  const headingRad = Math.atan2(forwardENU.x, forwardENU.y)
+  heading.value = Math.round(Cesium.Math.toDegrees(headingRad))
   if (heading.value < 0) heading.value += 360
 }
 
@@ -378,7 +406,7 @@ function handleWeaponInput(inputState: ReturnType<typeof input.getInputState>) {
       )
 
       if (missile) {
-        const forward = FlightModel.getForwardDirection(aircraftState.orientation)
+        const forward = FlightModel.getForwardDirection(aircraftState.position, aircraftState.orientation)
         networking.broadcastFire(
           'm',
           missile.position,
@@ -399,7 +427,7 @@ function handleWeaponInput(inputState: ReturnType<typeof input.getInputState>) {
   if (inputState.fireGun) {
     const bullet = weapons.fireGun(gameStore.playerId, aircraftState)
     if (bullet) {
-      const forward = FlightModel.getForwardDirection(aircraftState.orientation)
+      const forward = FlightModel.getForwardDirection(aircraftState.position, aircraftState.orientation)
       networking.broadcastFire('g', bullet.position, forward)
     }
   }
@@ -487,6 +515,7 @@ onUnmounted(() => {
   }
   networking.disconnect()
   weapons.clear()
+  deadReckoning.clear()
 })
 </script>
 
